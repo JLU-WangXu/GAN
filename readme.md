@@ -240,3 +240,165 @@ This project is licensed under the MIT License. See the [LICENSE](LICENSE) file 
 ---
 
 By combining the **Diffusion Module**, **Memory Module**, and **Dynamic Strategy Switching**, this framework provides a powerful and flexible approach to GAN training, enabling robust performance even in challenging noisy environments.
+
+
+
+根据相关研究中提到的**Diffusion-GAN**和其他类似工作的改进方法，我们可以优化现有的代码以提升效果。以下是具体优化方案及其代码实现：
+
+---
+
+## 优化方向
+
+### 1. **条件扩散过程（Conditional Diffusion Process）**
+**引入时序条件**：在扩散模块中，将时间步作为条件输入，使得噪声注入和去噪过程具有时序信息。
+
+- **优势**：允许模型逐步处理复杂数据分布，增强生成效果。
+
+### 2. **改进生成器目标**
+**使用Wasserstein距离代替二分类损失**：通过WGAN目标函数和梯度惩罚，可以解决GAN的不稳定训练问题。
+
+- **优势**：提升生成器的训练稳定性，缓解模式崩塌。
+
+### 3. **记忆与扩散的交互**
+**记忆模块与扩散模块融合**：在扩散模块内加入记忆机制，使得去噪过程能基于历史信息更好地恢复原始数据。
+
+- **优势**：在长期依赖的场景下，提升生成和去噪的效果。
+
+### 4. **多模态生成支持**
+通过引入扩散反向传播机制，生成器能够更加灵活地学习复杂分布中的多样性。
+
+- **优势**：生成更加多样和精确的样本。
+
+---
+
+## 优化后的代码
+
+以下是实现这些优化的代码框架：
+
+### 1. 扩散模块：引入时间步和条件
+```python
+class ConditionalDiffusionModule(nn.Module):
+    def __init__(self, input_size, time_embedding_size=32):
+        super(ConditionalDiffusionModule, self).__init__()
+        self.time_embedding = nn.Sequential(
+            nn.Linear(1, time_embedding_size),
+            nn.ReLU(),
+            nn.Linear(time_embedding_size, input_size)
+        )
+        self.denoising_net = nn.Sequential(
+            nn.Linear(input_size * 2, 128),
+            nn.ReLU(),
+            nn.Linear(128, input_size)
+        )
+
+    def add_noise(self, x, t, noise_level=0.1):
+        noise = torch.randn_like(x) * noise_level
+        return x + noise, self.time_embedding(t)
+
+    def denoise(self, noisy_x, time_emb):
+        combined = torch.cat([noisy_x, time_emb], dim=-1)
+        return self.denoising_net(combined)
+```
+
+### 2. 改进生成器和判别器目标：引入Wasserstein损失
+```python
+def wasserstein_loss(output, target):
+    return torch.mean(output * target)  # Wasserstein目标
+
+# 判别器更新：引入梯度惩罚
+def gradient_penalty(discriminator, real_data, fake_data, device):
+    batch_size = real_data.size(0)
+    alpha = torch.rand(batch_size, 1, 1, device=device).expand_as(real_data)
+    interpolated = (alpha * real_data + (1 - alpha) * fake_data).requires_grad_(True)
+    interpolated_outputs = discriminator(interpolated)
+    gradients = torch.autograd.grad(
+        outputs=interpolated_outputs,
+        inputs=interpolated,
+        grad_outputs=torch.ones_like(interpolated_outputs),
+        create_graph=True,
+        retain_graph=True
+    )[0]
+    gradients = gradients.view(batch_size, -1)
+    penalty = ((gradients.norm(2, dim=1) - 1) ** 2).mean()
+    return penalty
+```
+
+### 3. 记忆与扩散的融合
+在扩散模块中加入记忆：
+```python
+class DiffusionWithMemoryModule(nn.Module):
+    def __init__(self, input_size, hidden_size):
+        super(DiffusionWithMemoryModule, self).__init__()
+        self.memory = MemoryModule(input_size, hidden_size)
+        self.denoising_net = nn.Sequential(
+            nn.Linear(hidden_size + input_size, 128),
+            nn.ReLU(),
+            nn.Linear(128, input_size)
+        )
+
+    def denoise(self, noisy_x):
+        memory_output = self.memory(noisy_x)
+        combined = torch.cat([noisy_x, memory_output], dim=-1)
+        return self.denoising_net(combined)
+```
+
+### 4. 训练过程优化
+结合梯度惩罚的判别器更新：
+```python
+def train_with_wasserstein(generator, discriminator, diffusion_module, data_loader, epochs=10, noise_level=0.1, lambda_gp=10):
+    optimizer_g = optim.Adam(generator.parameters(), lr=0.0002)
+    optimizer_d = optim.Adam(discriminator.parameters(), lr=0.0002)
+
+    for epoch in range(epochs):
+        for real_data in data_loader:
+            real_data = real_data.to('cuda')
+            batch_size = real_data.size(0)
+
+            # 判别器更新
+            noise = torch.randn(batch_size, generator.input_size, device=real_data.device)
+            fake_data = generator(noise)
+            optimizer_d.zero_grad()
+            real_outputs = discriminator(real_data)
+            fake_outputs = discriminator(fake_data.detach())
+
+            gp = gradient_penalty(discriminator, real_data, fake_data, real_data.device)
+            loss_d = -torch.mean(real_outputs) + torch.mean(fake_outputs) + lambda_gp * gp
+            loss_d.backward()
+            optimizer_d.step()
+
+            # 生成器更新
+            optimizer_g.zero_grad()
+            fake_outputs = discriminator(fake_data)
+            loss_g = -torch.mean(fake_outputs)  # Wasserstein目标
+            loss_g.backward()
+            optimizer_g.step()
+
+        print(f"Epoch [{epoch+1}/{epochs}], Loss D: {loss_d.item():.4f}, Loss G: {loss_g.item():.4f}")
+```
+
+---
+
+## 实验计划
+
+### 1. **实验条件**
+- 数据集：模拟噪声数据集或真实世界的高噪声数据。
+- 比较标准：Wasserstein损失 vs. 原始GAN损失。
+- 噪声水平：测试多种噪声水平（0.05, 0.1, 0.2）。
+
+### 2. **实验目标**
+- 验证时间步条件对扩散性能的提升。
+- 比较引入Wasserstein损失后的稳定性。
+- 探讨记忆模块对去噪能力和生成质量的提升。
+
+---
+
+## 优化预期
+
+1. **扩散模块改进**：通过时间步条件，生成更高质量的样本。
+2. **生成器优化**：Wasserstein目标函数提升训练稳定性。
+3. **记忆增强**：在复杂分布和长期依赖的场景下，生成更加多样化的样本。
+4. **抗噪性能提升**：针对高噪声输入数据，生成器能更好地恢复分布结构。
+
+---
+
+通过这些优化，整个框架将更具有前沿性和实验价值，同时结合最新的研究方向，有助于在生成建模领域取得更加突出的效果。
